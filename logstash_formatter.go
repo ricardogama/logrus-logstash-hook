@@ -8,6 +8,34 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
+type FmtFunc func(e *logrus.Entry) ([]byte, error)
+
+func (ff FmtFunc) Format(e *logrus.Entry) ([]byte, error) {
+	return ff(e)
+}
+
+type Formator func(logrus.Formatter) logrus.Formatter
+
+func addAttribute(key string, value interface{}) Formator {
+	return func(f logrus.Formatter) logrus.Formatter {
+		return FmtFunc(func(e *logrus.Entry) ([]byte, error) {
+			e.Data[key] = value
+			return f.Format(e)
+		})
+	}
+}
+
+func defaultFormatter(logType, version string) logrus.Formatter {
+	f := &logrus.JSONFormatter{
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyTime:  "@timestamp",
+			logrus.FieldKeyLevel: "@level",
+			logrus.FieldKeyMsg:   "@message",
+		},
+	}
+	return addAttribute("type", logType)(addAttribute("@version", version)(f))
+}
+
 // Formatter generates json in logstash format.
 // Logstash site: http://logstash.net/
 type LogstashFormatter struct {

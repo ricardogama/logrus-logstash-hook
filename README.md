@@ -1,5 +1,5 @@
 # Logstash hook for logrus <img src="http://i.imgur.com/hTeVwmJ.png" width="40" height="40" alt=":walrus:" class="emoji" title=":walrus:" /> [![Build Status](https://travis-ci.org/bshuster-repo/logrus-logstash-hook.svg?branch=master)](https://travis-ci.org/bshuster-repo/logrus-logstash-hook)
-Use this hook to send the logs to [Logstash](https://www.elastic.co/products/logstash) over both UDP and TCP.
+Use this hook to send the logs to [Logstash](https://www.elastic.co/products/logstash).
 
 ## Usage
 
@@ -13,7 +13,8 @@ import (
 
 func main() {
         log := logrus.New()
-        hook, err := logrus_logstash.NewHook("tcp", "172.17.0.2:9999", "myappName")
+        opts := logrus_logstash.Options{Protocol: "tcp", Address: "172.17.0.2:9999", AppName: "myappName"}
+        hook, err := logrus_logstash.New(opts)
 
         if err != nil {
                 log.Fatal(err)
@@ -41,7 +42,13 @@ This is how it will look like:
           "type" => "myappName"
 }
 ```
-## Hook Fields
+
+## Deprecated
+The following API is deprecated and going to be removed in version 1.x.
+If you think differently, please open an issue and only popular use cases will
+be considered to be kept.
+
+### Hook fields
 Fields can be added to the hook, which will always be in the log context.
 This can be done when creating the hook:
 
@@ -71,9 +78,7 @@ Single fields can be added/updated using 'WithField':
 hook.WithField("status", "running")
 ```
 
-
-
-## Field prefix
+### Field prefix
 
 The hook allows you to send logging to logstash and also retain the default std output in text format.
 However to keep this console output readable some fields might need to be omitted from the default non-hooked log output.

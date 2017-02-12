@@ -3,7 +3,9 @@ package logrus_logstash
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"io"
+	"io/ioutil"
 	"net"
 	"reflect"
 	"testing"
@@ -12,277 +14,106 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-func TestLegostashHook(t *testing.T) {
-	type Expct struct {
-		appName          string
-		hookOnlyPrefix   string
-		alwaysSentFields logrus.Fields
-	}
+func TestValidOptions(t *testing.T) {
 	tt := []struct {
-		expected Expct
-		initFunc func() (*Hook, error)
+		input Options
+		err   error
 	}{
-		{Expct{"bla", "", nil}, func() (*Hook, error) {
-			return NewHook("udp", "localhost:9999", "bla")
-		}},
-		{Expct{"bzz", "", nil}, func() (*Hook, error) {
-			udpConn, err := net.Dial("udp", "localhost:9999")
+		{Options{}, errors.New("Missing connection details")},
+		{Options{Conn: &bytes.Buffer{}}, nil},
+		{Options{Address: "localhost:8989", Protocol: "udp"}, nil},
+		{Options{Address: "localhost:8989"}, errors.New("Missing connection details")},
+		{Options{Protocol: "tcp"}, errors.New("Missing connection details")},
+		{Options{Conn: &bytes.Buffer{}, Protocol: "tcp"}, errors.New("Specify Conn or Address and Protocol")},
+		{Options{Conn: &bytes.Buffer{}, Address: "localhost"}, errors.New("Specify Conn or Address and Protocol")},
+		{Options{Conn: &bytes.Buffer{}, AppName: "bla", Formatter: &logrus.JSONFormatter{}}, errors.New("Specify AppName or Formatter")},
+	}
+
+	for _, te := range tt {
+		if err := validOptions(te.input); !reflect.DeepEqual(err, te.err) {
+			t.Errorf("Expected error to be '%s' but got '%s'", te.err, err)
+		}
+	}
+}
+
+func TestNew(t *testing.T) {
+	udpConn, err := net.Dial("udp", "localhost:9090")
+	if err != nil {
+		t.Errorf("Expected udp connection won't fail: %s", err)
+	}
+
+	tt := []struct {
+		in  Options
+		out *Hook
+	}{
+		{Options{Conn: udpConn, Formatter: &logrus.JSONFormatter{}},
+			&Hook{
+				conn:      udpConn,
+				ctx:       logrus.Fields{},
+				formatter: &logrus.JSONFormatter{},
+			}},
+		{Options{Conn: udpConn, Formatter: &logrus.JSONFormatter{}, Fields: logrus.Fields{"id": "12"}},
+			&Hook{
+				conn: udpConn,
+				ctx: logrus.Fields{
+					"id": "12",
+				},
+				formatter: &logrus.JSONFormatter{},
+			},
+		},
+	}
+
+	for _, te := range tt {
+		if hook, err := New(te.in); err != nil || !reflect.DeepEqual(te.out, hook) {
 			if err != nil {
-				return nil, err
+				t.Errorf("Expected New to not fail")
+			} else {
+				t.Errorf("Expected to receive '%#v' but got '%#v'", te.out, hook)
 			}
-			return NewHookWithConn(udpConn, "bzz")
-		}},
-		{Expct{"blk", "", logrus.Fields{"id": 1}}, func() (*Hook, error) {
-			return NewHookWithFields("udp", "localhost:9999", "blk", logrus.Fields{"id": 1})
-		}},
-		{Expct{"prefix", "-->", logrus.Fields{"id": 1}}, func() (*Hook, error) {
-			return NewHookWithFieldsAndPrefix("udp", "localhost:9999", "prefix", logrus.Fields{"id": 1}, "-->")
-		}},
-		{Expct{"fieldsconn", "", logrus.Fields{"id": 5}}, func() (*Hook, error) {
-			udpConn, err := net.Dial("udp", "localhost:9999")
-			if err != nil {
-				return nil, err
-			}
-			return NewHookWithFieldsAndConn(udpConn, "fieldsconn", logrus.Fields{"id": 5})
-		}},
-		{Expct{"zz", "~~>", logrus.Fields{"id": "bal"}}, func() (*Hook, error) {
-			udpConn, err := net.Dial("udp", "localhost:9999")
-			if err != nil {
-				return nil, err
-			}
-			return NewHookWithFieldsAndConnAndPrefix(udpConn, "zz", logrus.Fields{"id": "bal"}, "~~>")
-		}},
-	}
-
-	for _, te := range tt {
-		h, err := te.initFunc()
-		if err != nil {
-			t.Error(err)
-		}
-		if h == nil {
-			t.Error("expected hook to be not nil")
-		}
-
-		if h.conn == nil {
-			t.Error("expected conn to be not nil")
-		}
-		if h.appName != te.expected.appName {
-			t.Errorf("expected appName to be '%s' but got '%s'", te.expected.appName, h.appName)
-		}
-		if h.alwaysSentFields == nil {
-			t.Error("expected alwaysSentFields to be not nil")
-		}
-		if te.expected.alwaysSentFields != nil && !reflect.DeepEqual(te.expected.alwaysSentFields, h.alwaysSentFields) {
-			t.Errorf("expected alwaysSentFields to be '%v' but got '%v'", te.expected.alwaysSentFields, h.alwaysSentFields)
-		}
-		if h.hookOnlyPrefix != te.expected.hookOnlyPrefix {
-			t.Error("expected hookOnlyPrefix to be an empty string")
 		}
 	}
 }
 
-func TestNewFiltering(t *testing.T) {
-	type Expct struct {
-		prefix  string
-		appName string
+func TestNewAddressProtocol(t *testing.T) {
+	opts := Options{
+		Address:  "172.17.1.1:9090",
+		Protocol: "udp",
 	}
+	h, err := New(opts)
+	if err != nil {
+		t.Errorf("Expected New not to fail: %s", err)
+	}
+	v, k := h.conn.(net.Conn)
+	if !k {
+		t.Error("Expected conn to be net.Conn interface too")
+	}
+	if v.RemoteAddr().String() != opts.Address {
+		t.Errorf("Expected connection to be '%s' but got '%s'", opts.Address, v.RemoteAddr().String())
+	}
+}
+
+func TestNewErrors(t *testing.T) {
 	tt := []struct {
-		expected Expct
-		initFunc func() *Hook
+		errMsg string
+		opts   Options
 	}{
-		{Expct{"", ""}, func() *Hook {
-			return NewFilterHook()
-		}},
-		{Expct{"~~~>", ""}, func() *Hook {
-			return NewFilterHookWithPrefix("~~~>")
-		}},
+		{"dial tcp 172.17.11.1:9090: getsockopt: no route to host", Options{Address: "172.17.11.1:9090", Protocol: "tcp"}},
+		{"Missing connection details", Options{}},
+		{"Specify Conn or Address and Protocol", Options{Conn: &bytes.Buffer{}, Protocol: "udp"}},
 	}
-
 	for _, te := range tt {
-		h := te.initFunc()
-		if h.conn != nil {
-			t.Error("expected conn to be nil")
+		_, err := New(te.opts)
+		if err == nil {
+			t.Errorf("Expected to fail")
 		}
-		if h.alwaysSentFields == nil {
-			t.Error("expected alwaysSentFields to be not nil")
-		}
-		if h.hookOnlyPrefix != te.expected.prefix {
-			t.Errorf("expected prefix to be '%s' but got '%s'", te.expected.prefix, h.hookOnlyPrefix)
+		if err.Error() != te.errMsg {
+			t.Errorf("Expected error message to be '%s' but got '%s'", te.errMsg, err.Error())
 		}
 	}
 }
 
-func TestSettingAttributes(t *testing.T) {
-	tt := []struct {
-		setFunc   func(*Hook)
-		expctFunc func(*Hook) error
-	}{
-		{func(h *Hook) {
-			h.WithPrefix("mprefix1")
-		}, func(h *Hook) error {
-			if h.hookOnlyPrefix != "mprefix1" {
-				return fmt.Errorf("expected hookOnlyPrefix to be '%s' but got '%s'", "mprefix1", h.hookOnlyPrefix)
-			}
-			return nil
-		}},
-		{func(h *Hook) {
-			h.WithField("name", "muha")
-		}, func(h *Hook) error {
-			nField := logrus.Fields{"name": "muha"}
-			if !reflect.DeepEqual(h.alwaysSentFields, nField) {
-				return fmt.Errorf("expected hookOnlyPrefix to be '%s' but got '%s'", nField, h.hookOnlyPrefix)
-			}
-			return nil
-		}},
-		{func(h *Hook) {
-			h.WithFields(logrus.Fields{"filename": "app.log", "owner": "mick"})
-		}, func(h *Hook) error {
-			nField := logrus.Fields{"name": "test-me!", "filename": "app.log", "owner": "mick"}
-			if !reflect.DeepEqual(h.alwaysSentFields, nField) {
-				return fmt.Errorf("expected hookOnlyPrefix to be '%s' but got '%s'", nField, h.hookOnlyPrefix)
-			}
-			return nil
-		}},
-	}
-
-	for _, te := range tt {
-		hook := NewFilterHook()
-		hook.alwaysSentFields = logrus.Fields{"name": "test-me!"}
-		te.setFunc(hook)
-		if err := te.expctFunc(hook); err != nil {
-			t.Error(err)
-		}
-	}
-}
-
-func TestFilterHookOnly(t *testing.T) {
-	tt := []struct {
-		entry    *logrus.Entry
-		prefix   string
-		expected logrus.Fields
-	}{
-		{&logrus.Entry{Data: logrus.Fields{"name": "slimshady"}}, "", logrus.Fields{"name": "slimshady"}},
-		{&logrus.Entry{Data: logrus.Fields{"_name": "slimshady", "nick": "blabla"}}, "_", logrus.Fields{"nick": "blabla"}},
-	}
-
-	for _, te := range tt {
-		hook := NewFilterHookWithPrefix(te.prefix)
-		hook.filterHookOnly(te.entry)
-		if !reflect.DeepEqual(te.entry.Data, te.expected) {
-			t.Errorf("expected entry data to be '%v' but got '%v'", te.expected, te.entry.Data)
-		}
-	}
-}
-
-type AddrMock struct {
-}
-
-func (a AddrMock) Network() string {
-	return ""
-}
-
-func (a AddrMock) String() string {
-	return ""
-}
-
-type ConnMock struct {
-	buff *bytes.Buffer
-}
-
-func (c ConnMock) Read(b []byte) (int, error) {
-	return c.buff.Read(b)
-}
-
-func (c ConnMock) Write(b []byte) (int, error) {
-	return c.buff.Write(b)
-}
-
-func (c ConnMock) Close() error {
-	return nil
-}
-
-func (c ConnMock) LocalAddr() net.Addr {
-	return AddrMock{}
-}
-
-func (c ConnMock) RemoteAddr() net.Addr {
-	return AddrMock{}
-}
-
-func (c ConnMock) SetDeadline(t time.Time) error {
-	return nil
-}
-
-func (c ConnMock) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c ConnMock) SetWriteDeadline(t time.Time) error {
-	return nil
-}
-
-func TestFire(t *testing.T) {
-	conn := ConnMock{buff: bytes.NewBufferString("")}
-	hook := &Hook{
-		conn:             conn,
-		appName:          "fire_test",
-		alwaysSentFields: logrus.Fields{"test-name": "fire-test", "->ignore": "haaa", "override": "no"},
-		hookOnlyPrefix:   "->",
-	}
-	entry := &logrus.Entry{
-		Message: "hello world!",
-		Data:    logrus.Fields{"override": "yes"},
-		Level:   logrus.DebugLevel,
-	}
-	if err := hook.Fire(entry); err != nil {
-		t.Error(err)
-	}
-	var res map[string]string
-	if err := json.NewDecoder(conn.buff).Decode(&res); err != nil {
-		t.Error(err)
-	}
-	expected := map[string]string{
-		"@timestamp": "0001-01-01 00:00:00.000",
-		"@version":   "1",
-		"ignore":     "haaa",
-		"level":      "debug",
-		"message":    "hello world!",
-		"override":   "yes",
-		"test-name":  "fire-test",
-		"type":       "fire_test",
-	}
-	if !reflect.DeepEqual(expected, res) {
-		t.Errorf("expected message to be '%v' but got '%v'", expected, res)
-	}
-}
-
-func TestFireFilterHook(t *testing.T) {
-	hook := &Hook{
-		appName:          "fire_hook_test",
-		alwaysSentFields: logrus.Fields{"test-name": "fire-test-hook", "_ignore": "haaa", "override": "no"},
-		hookOnlyPrefix:   "_",
-	}
-	entry := &logrus.Entry{
-		Message: "hello world!",
-		Data:    logrus.Fields{"override": "yes"},
-		Level:   logrus.DebugLevel,
-	}
-	if err := hook.Fire(entry); err != nil {
-		t.Error(err)
-	}
-	expected := &logrus.Entry{
-		Message: "hello world!",
-		Data:    logrus.Fields{"test-name": "fire-test-hook", "override": "yes"},
-		Level:   logrus.DebugLevel,
-	}
-
-	if !reflect.DeepEqual(expected, entry) {
-		t.Errorf("expected message to be '%v' but got '%v'", expected, entry)
-	}
-}
-
-func TestLevels(t *testing.T) {
-	hook := &Hook{}
+func TestHookLevels(t *testing.T) {
+	h := &Hook{}
 	expected := []logrus.Level{
 		logrus.PanicLevel,
 		logrus.FatalLevel,
@@ -291,9 +122,94 @@ func TestLevels(t *testing.T) {
 		logrus.InfoLevel,
 		logrus.DebugLevel,
 	}
-	res := hook.Levels()
-	if !reflect.DeepEqual(expected, res) {
-		t.Errorf("expected levels to be '%v' but got '%v'", expected, res)
+	if !reflect.DeepEqual(h.Levels(), expected) {
+		t.Errorf("Expected h.Levels return '%v' but got '%v'", expected, h.Levels())
+	}
+}
+
+func TestHookFire(t *testing.T) {
+	tt := []struct {
+		buffer io.ReadWriter
+		fields logrus.Fields
+		app    string
+
+		level   logrus.Level
+		message string
+		data    logrus.Fields
+
+		expected map[string]interface{}
+	}{
+		{&bytes.Buffer{}, logrus.Fields{"f1": 1}, "test1", logrus.PanicLevel,
+			"hello world", logrus.Fields{"id": "a1"},
+			map[string]interface{}{"id": "a1", "f1": 1.0, "@message": "hello world",
+				"@level": "panic", "@timestamp": time.Time{}.Format(time.RFC3339),
+				"type": "test1", "@version": "1"}},
+		{&bytes.Buffer{}, logrus.Fields{"f1": 1}, "test2", logrus.InfoLevel,
+			"world", logrus.Fields{"f1": "a2"},
+			map[string]interface{}{"f1": "a2", "@message": "world",
+				"@level": "info", "@timestamp": time.Time{}.Format(time.RFC3339),
+				"type": "test2", "@version": "1"}},
 	}
 
+	for _, te := range tt {
+		entry := &logrus.Entry{
+			Level:   te.level,
+			Message: te.message,
+			Time:    time.Time{},
+			Data:    te.data,
+		}
+		h, err := New(Options{Conn: te.buffer, Fields: te.fields, AppName: te.app})
+		if err != nil {
+			t.Errorf("Expected hook creation won't fail: %s", err)
+		}
+		if err := h.Fire(entry); err != nil {
+			t.Errorf("Expected Fire to not fail: %s", err)
+		}
+		var res map[string]interface{}
+		resBytes, err := ioutil.ReadAll(te.buffer)
+		if err != nil {
+			t.Errorf("Failed reading buffer: %s", err)
+		}
+		if err := json.Unmarshal(resBytes, &res); err != nil {
+			t.Errorf("Failed unmarshalling read buffer: %s", err)
+		}
+		if !reflect.DeepEqual(te.expected, res) {
+			t.Errorf("Expected to get '%s' but got '%s'", te.expected, res)
+		}
+	}
+}
+
+type failer struct {
+	errMsg string
+	wfunc  func() error
+	ffunc  func() error
+}
+
+func (f failer) Format(entry *logrus.Entry) ([]byte, error) {
+	return nil, f.ffunc()
+}
+
+func (f failer) Write(p []byte) (int, error) {
+	return 0, f.wfunc()
+}
+
+func TestFireErrors(t *testing.T) {
+	tt := []failer{
+		{"format error", func() error { return nil }, func() error { return errors.New("format error") }},
+		{"write error", func() error { return errors.New("write error") }, func() error { return nil }},
+	}
+
+	for _, te := range tt {
+		h, err := New(Options{Conn: te, Formatter: te})
+		if err != nil {
+			t.Errorf("Failed creating hook: %s", err)
+		}
+		err = h.Fire(&logrus.Entry{Data: logrus.Fields{}})
+		if err == nil {
+			t.Errorf("Expected Fire to fail but it didn't")
+		}
+		if err.Error() != te.errMsg {
+			t.Errorf("Expected error message to be '%s' but got '%s'", te.errMsg, err)
+		}
+	}
 }
