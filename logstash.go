@@ -1,10 +1,10 @@
 package logrus_logstash
 
 import (
+	"github.com/Sirupsen/logrus"
+	"log"
 	"net"
 	"strings"
-
-	"github.com/Sirupsen/logrus"
 )
 
 // Hook represents a connection to a Logstash instance
@@ -108,6 +108,8 @@ func (h *Hook) Fire(entry *logrus.Entry) error {
 	formatter := LogstashFormatter{Type: h.appName}
 
 	dataBytes, err := formatter.FormatWithPrefix(entry, h.hookOnlyPrefix)
+	log.Println("Fire hook with bytes: ", string(dataBytes))
+
 	if err != nil {
 		return err
 	}
